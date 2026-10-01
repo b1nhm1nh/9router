@@ -18,6 +18,8 @@ const CTX = {
   claudeModels: { ANTHROPIC_DEFAULT_OPUS_MODEL: "cc/claude-opus-5" },
 };
 const tool = (id) => tools.TOOLS.find((t) => t.id === id);
+// Read from the source of truth so a default-model bump can't break these tests.
+const defaultFor = (flag) => tools.CLAUDE_MODELS.find((m) => m.flag === flag).defaultValue;
 const readJson = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
 
 describe("connect helpers", () => {
@@ -205,7 +207,7 @@ describe("connect run()", () => {
     expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("srv/opus");
     expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("srv/sonnet[1m]");
     // Tiers the server did not configure keep the built-in default.
-    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("cc/claude-haiku-4-5-20251001");
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe(defaultFor("haiku"));
     expect(readJson(path.join(home, ".config", "opencode", "opencode.json")).model).toBe("9router/srv/default");
 
     // The server's own key and loopback base URL must not leak into our config.
@@ -274,7 +276,7 @@ describe("connect run()", () => {
     expect(readJson(path.join(home, ".claude", "settings.json")).env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("mine/opus");
 
     await connect.run(["http://gw.test", "--password", "x", "--tools", "claude", "--no-inherit"]);
-    expect(readJson(path.join(home, ".claude", "settings.json")).env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("cc/claude-opus-5");
+    expect(readJson(path.join(home, ".claude", "settings.json")).env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe(defaultFor("opus"));
   });
 
   it("falls back to defaults when the server's cli-tools config is unreadable", async () => {
@@ -287,7 +289,7 @@ describe("connect run()", () => {
       return json({ data: [] });
     });
     expect(await connect.run(["http://gw.test", "--password", "x", "--tools", "claude"])).toBe(0);
-    expect(readJson(path.join(home, ".claude", "settings.json")).env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("cc/claude-opus-5");
+    expect(readJson(path.join(home, ".claude", "settings.json")).env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe(defaultFor("opus"));
   });
 
   it("reset keeps going when one tool fails and returns 1", async () => {

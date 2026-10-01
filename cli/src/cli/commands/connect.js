@@ -10,7 +10,7 @@
 const os = require("os");
 const { TOOL_IDS, CLAUDE_MODELS, resolveTools } = require("./connectTools");
 
-const DEFAULT_MODEL = "cc/claude-sonnet-5";
+const DEFAULT_MODEL = "cc/claude-sonnet-5-5";
 
 const HELP = `
 Usage: 9router connect <server-url> [options]
