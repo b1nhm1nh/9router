@@ -156,6 +156,80 @@ describe("connect run()", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  // Fake server: the operator's own model choices differ from the CLI defaults,
+  // and its cli-tools config carries ITS own API key (must never be copied here).
+  const SERVER_KEY = "sk-server-side-key-9999";
+  const MY_KEY = "sk-mine-0000000000000";
+  function mockServer() {
+    const json = (body) => Promise.resolve(new Response(JSON.stringify(body), {
+      status: 200, headers: { "content-type": "application/json", "set-cookie": "auth_token=t; Path=/" },
+    }));
+    return vi.spyOn(globalThis, "fetch").mockImplementation((url) => {
+      const u = String(url);
+      if (u.endsWith("/api/auth/login")) return json({ success: true });
+      if (u.endsWith("/api/keys")) return json({ keys: [{ name: `cli-${os.hostname()}`, key: MY_KEY, isActive: true }] });
+      if (u.endsWith("/api/cli-tools/claude-settings")) {
+        return json({ installed: true, settings: { env: {
+          ANTHROPIC_BASE_URL: "http://127.0.0.1:20128/v1",
+          ANTHROPIC_AUTH_TOKEN: SERVER_KEY,
+          ANTHROPIC_DEFAULT_OPUS_MODEL: "srv/opus",
+          ANTHROPIC_DEFAULT_SONNET_MODEL: "srv/sonnet[1m]",
+        } } });
+      }
+      if (u.endsWith("/api/cli-tools/opencode-settings")) {
+        return json({ installed: true, config: { model: "9router/srv/default", provider: { "9router": { options: { apiKey: SERVER_KEY } } } } });
+      }
+      if (u.endsWith("/v1/models")) return json({ data: [{ id: "srv/opus" }, { id: "srv/sonnet" }, { id: "srv/default" }] });
+      return json({});
+    });
+  }
+
+  it("inherits the server's configured models instead of the built-in defaults", async () => {
+    mockServer();
+    expect(await connect.run(["http://gw.test", "--password", "x", "--tools", "claude,opencode"])).toBe(0);
+
+    const env = readJson(path.join(home, ".claude", "settings.json")).env;
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("srv/opus");
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("srv/sonnet[1m]");
+    // Tiers the server did not configure keep the built-in default.
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("cc/claude-haiku-4-5-20251001");
+    expect(readJson(path.join(home, ".config", "opencode", "opencode.json")).model).toBe("9router/srv/default");
+
+    // The server's own key and loopback base URL must not leak into our config.
+    const written = fs.readFileSync(path.join(home, ".claude", "settings.json"), "utf8");
+    expect(written).toContain(MY_KEY);
+    expect(written).not.toContain(SERVER_KEY);
+    expect(env.ANTHROPIC_BASE_URL).toBe("http://gw.test/v1");
+    // The "[1m]" marker is stripped before the availability check, so the
+    // sonnet tier draws no warning (fable/haiku fall back to defaults the
+    // fake server does not list, and those warnings are correct).
+    const warnings = console.log.mock.calls.map((c) => c[0]).filter((l) => String(l).includes("not listed by server"));
+    expect(warnings.some((l) => l.includes("sonnet"))).toBe(false);
+    expect(warnings.some((l) => l.includes("opus"))).toBe(false);
+  });
+
+  it("explicit flags and --no-inherit beat the server's values", async () => {
+    mockServer();
+    await connect.run(["http://gw.test", "--password", "x", "--tools", "claude", "--opus", "mine/opus"]);
+    expect(readJson(path.join(home, ".claude", "settings.json")).env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("mine/opus");
+
+    await connect.run(["http://gw.test", "--password", "x", "--tools", "claude", "--no-inherit"]);
+    expect(readJson(path.join(home, ".claude", "settings.json")).env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("cc/claude-opus-5");
+  });
+
+  it("falls back to defaults when the server's cli-tools config is unreadable", async () => {
+    mockServer().mockImplementation((url) => {
+      const u = String(url);
+      const json = (b, h) => Promise.resolve(new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json", ...h } }));
+      if (u.endsWith("/api/auth/login")) return json({ success: true }, { "set-cookie": "auth_token=t" });
+      if (u.endsWith("/api/keys")) return json({ keys: [{ name: `cli-${os.hostname()}`, key: MY_KEY, isActive: true }] });
+      if (u.includes("/api/cli-tools/")) return Promise.resolve(new Response("nope", { status: 500 }));
+      return json({ data: [] });
+    });
+    expect(await connect.run(["http://gw.test", "--password", "x", "--tools", "claude"])).toBe(0);
+    expect(readJson(path.join(home, ".claude", "settings.json")).env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("cc/claude-opus-5");
+  });
+
   it("reset keeps going when one tool fails and returns 1", async () => {
     const f = path.join(home, ".codex", "config.toml");
     fs.mkdirSync(path.dirname(f), { recursive: true });

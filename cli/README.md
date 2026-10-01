@@ -102,7 +102,9 @@ npx 9router connect --reset --tools claude,codex                     # undo
 
 It logs in with the dashboard password (hidden prompt), reuses or creates an API key named `cli-<hostname>`, and writes each tool's config (backing up the original once as `*.bak-9router`).
 
-Supported: `claude`, `codex`, `opencode`, `droid`, `crush`, `kilo`, `cline`, or `all`. Other options: `--model`, `--opus/--sonnet/--haiku/--fable`, `--api-key`, `--key-name`, `--print-env`. See `9router connect --help`.
+Models are inherited from the server's own CLI-tools configuration, so a client gets whatever the operator already picked on the dashboard. Override a tier with `--opus/--sonnet/--haiku/--fable` (or `--model` for non-Claude tools), or ignore the server's choices with `--no-inherit`.
+
+Supported: `claude`, `codex`, `opencode`, `droid`, `crush`, `kilo`, `cline`, or `all`. Other options: `--api-key`, `--key-name`, `--print-env`. See `9router connect --help`.
 
 > ⚠️ Over plain `http://` the password and API key are sent unencrypted — use a trusted LAN/VPN or put HTTPS in front. The API key is stored in each tool's config file.
 

@@ -29,9 +29,11 @@ Options:
                          prompted if omitted — preferred, keeps it out of shell history)
   --key-name <name>      API key name to reuse/create (default: cli-<hostname>)
   --api-key <key>        Use this API key, skip login + key lookup
-  --model <model>        Model for non-Claude tools (default: ${DEFAULT_MODEL})
+  --model <model>        Model for non-Claude tools (default: the server's own
+                         OpenCode model, else ${DEFAULT_MODEL})
   --fable|--opus|--sonnet|--haiku <model>
                          Override Claude Code model mapping
+  --no-inherit           Ignore the server's configured models, use built-in defaults
   --print-env            Also print OpenAI-compatible env vars for other CLIs
   --reset                Remove 9router settings from the selected tools and exit
   -h, --help             Show this help
@@ -56,6 +58,7 @@ function parseArgs(argv) {
     else if (a === "--api-key") opts.apiKey = next();
     else if (a === "--tools") opts.tools = next().split(",");
     else if (a === "--model") opts.model = next();
+    else if (a === "--no-inherit") opts.noInherit = true;
     else if (a === "--print-env") opts.printEnv = true;
     else if (a === "--reset") opts.reset = true;
     else if (a === "-h" || a === "--help") opts.help = true;
@@ -141,6 +144,35 @@ async function getOrCreateApiKey(server, cookie, keyName) {
   return { key: created.data.key, created: true };
 }
 
+/**
+ * Model choices the server operator already made, read from the server's own
+ * cli-tools config. Only model ids are taken — never the server's baseUrl or
+ * apiKey, which belong to that host and must not be copied to this machine.
+ * Best-effort: any failure returns {} and the built-in defaults apply.
+ */
+async function fetchServerModels(server, cookie) {
+  const out = { claude: {}, model: null };
+  if (!cookie) return out;
+
+  try {
+    const res = await request(`${server}/api/cli-tools/claude-settings`, { cookie });
+    const env = res.data?.settings?.env;
+    if (env) {
+      for (const m of CLAUDE_MODELS) {
+        if (typeof env[m.envKey] === "string" && env[m.envKey]) out.claude[m.flag] = env[m.envKey];
+      }
+    }
+  } catch { /* server-side Claude config unreadable — keep defaults */ }
+
+  try {
+    const res = await request(`${server}/api/cli-tools/opencode-settings`, { cookie });
+    const active = res.data?.config?.model;
+    if (typeof active === "string" && active.startsWith("9router/")) out.model = active.slice("9router/".length);
+  } catch { /* ditto */ }
+
+  return out;
+}
+
 async function listModels(server, apiKey) {
   const res = await request(`${server}/v1/models`, { apiKey });
   if (res.status === 401) throw new Error("API key rejected by server (/v1/models returned 401)");
@@ -212,33 +244,51 @@ async function runConnect(argv) {
   }
 
   let apiKey = opts.apiKey;
+  let cookie = null;
   if (apiKey) {
     console.log("• Using provided API key");
   } else {
     const password = opts.password ?? (await promptPassword());
     console.log(`• Logging in to ${server}`);
-    const cookie = await login(server, password);
+    cookie = await login(server, password);
     const result = await getOrCreateApiKey(server, cookie, opts.keyName);
     apiKey = result.key;
     console.log(`• ${result.created ? "Created" : "Reusing"} API key "${opts.keyName}" (${maskKey(apiKey)})`);
   }
 
+  // Inherit the server's configured models, unless --no-inherit or an explicit flag.
+  const serverModels = opts.noInherit ? { claude: {}, model: null } : await fetchServerModels(server, cookie);
+  if (!opts.noInherit && !cookie) {
+    console.log("• --api-key given: skipping server model lookup (needs a dashboard login)");
+  }
+
   const available = await listModels(server, apiKey);
   const warnMissing = (label, model, flag) => {
-    if (available && !available.has(model)) {
+    // Claude Code's "[1m]" context marker is part of the env value, not the model id.
+    if (available && !available.has(model.replace(/\[1m\]$/, ""))) {
       console.log(`\x1b[33m⚠ ${label}: "${model}" not listed by server — override with ${flag} <model>\x1b[0m`);
     }
   };
 
+  const inherited = [];
   const claudeModels = {};
   if (tools.some((t) => t.id === "claude")) {
     for (const m of CLAUDE_MODELS) {
-      claudeModels[m.envKey] = opts.models[m.flag] || m.defaultValue;
+      if (opts.models[m.flag]) claudeModels[m.envKey] = opts.models[m.flag];
+      else if (serverModels.claude[m.flag]) {
+        claudeModels[m.envKey] = serverModels.claude[m.flag];
+        inherited.push(m.flag);
+      } else claudeModels[m.envKey] = m.defaultValue;
       warnMissing(`claude ${m.flag}`, claudeModels[m.envKey], `--${m.flag}`);
     }
   }
-  const model = opts.model || DEFAULT_MODEL;
+  let model = opts.model || DEFAULT_MODEL;
+  if (!opts.model && serverModels.model) {
+    model = serverModels.model;
+    inherited.push("model");
+  }
   if (tools.some((t) => t.id !== "claude")) warnMissing("model", model, "--model");
+  if (inherited.length) console.log(`• Using the server's configured models (${inherited.join(", ")}) — override per tier, or use --no-inherit`);
 
   const ctx = { baseUrl: server, apiKey, model, claudeModels };
   let failed = 0;
