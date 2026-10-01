@@ -130,6 +130,19 @@ describe("connect tool writers", () => {
     expect(readJson(f).customModels.map((m) => m.id)).toEqual(["mine"]);
   });
 
+  it("serverModel extractors read only 9router-owned model ids", async () => {
+    expect(await tool("codex").serverModel({ config: 'model = "a"\nmodel_provider = "9router"\n' })).toBe("a");
+    // A model belonging to another provider is not ours to inherit.
+    expect(await tool("codex").serverModel({ config: 'model = "gpt-6"\nmodel_provider = "openai"\n' })).toBeNull();
+    expect(await tool("codex").serverModel({ config: null })).toBeNull();
+    expect(tool("opencode").serverModel({ config: { model: "9router/b" } })).toBe("b");
+    expect(tool("opencode").serverModel({ config: { model: "anthropic/c" } })).toBeNull();
+    expect(tool("droid").serverModel({ settings: { customModels: [{ id: "x", model: "n" }] } })).toBeNull();
+    expect(tool("crush").serverModel({ config: { providers: { "9router": { models: [{ id: "d" }] } } } })).toBe("d");
+    expect(tool("cline").serverModel({ settings: { actModeApiProvider: "cline", openAiModelId: "e" } })).toBeNull();
+    expect(tool("kilo").serverModel).toBeUndefined();
+  });
+
   it("cline uses base URL without /v1 and reset reports both files", async () => {
     await tool("cline").apply(CTX);
     const state = readJson(path.join(home, ".cline", "data", "globalState.json"));
@@ -206,6 +219,53 @@ describe("connect run()", () => {
     const warnings = console.log.mock.calls.map((c) => c[0]).filter((l) => String(l).includes("not listed by server"));
     expect(warnings.some((l) => l.includes("sonnet"))).toBe(false);
     expect(warnings.some((l) => l.includes("opus"))).toBe(false);
+  });
+
+  it("each tool inherits its OWN server model, falling back to OpenCode's", async () => {
+    const fetchSpy = mockServer();
+    const base = fetchSpy.getMockImplementation();
+    const json = (b) => Promise.resolve(new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } }));
+    fetchSpy.mockImplementation((url) => {
+      const u = String(url);
+      // Server-side configs also hold the server's key — must be ignored.
+      if (u.endsWith("/api/cli-tools/codex-settings")) {
+        return json({ installed: true, config: `model = "srv/codex"\nmodel_provider = "9router"\n[model_providers.9router]\nhttp_headers = { Authorization = "Bearer ${SERVER_KEY}" }\n` });
+      }
+      if (u.endsWith("/api/cli-tools/droid-settings")) {
+        return json({ installed: true, settings: { customModels: [{ id: "mine", model: "x" }, { id: "custom:9Router-0", model: "srv/droid", apiKey: SERVER_KEY }] } });
+      }
+      if (u.endsWith("/api/cli-tools/cline-settings")) {
+        return json({ installed: true, settings: { actModeApiProvider: "openai", openAiModelId: "srv/cline" } });
+      }
+      if (u.endsWith("/api/cli-tools/crush-settings")) return json({ installed: false, config: null });
+      return base(url);
+    });
+
+    expect(await connect.run(["http://gw.test", "--password", "x", "--tools", "codex,droid,cline,crush,kilo"])).toBe(0);
+
+    expect(fs.readFileSync(path.join(home, ".codex", "config.toml"), "utf8")).toContain('model = "srv/codex"');
+    expect(readJson(path.join(home, ".factory", "settings.json")).customModels[0].model).toBe("srv/droid");
+    expect(readJson(path.join(home, ".cline", "data", "globalState.json")).openAiModelId).toBe("srv/cline");
+    // crush (not installed on server) and kilo (no model exposed) fall back to OpenCode's model.
+    expect(readJson(path.join(home, ".config", "crush", "crush.json")).providers["9router"].models[0].id).toBe("srv/default");
+    expect(readJson(path.join(home, ".local", "share", "kilo", "auth.json"))["openai-compatible"].model).toBe("srv/default");
+
+    for (const f of [
+      path.join(home, ".codex", "config.toml"),
+      path.join(home, ".factory", "settings.json"),
+      path.join(home, ".cline", "data", "secrets.json"),
+    ]) {
+      const text = fs.readFileSync(f, "utf8");
+      expect(text).toContain(MY_KEY);
+      expect(text).not.toContain(SERVER_KEY);
+    }
+  });
+
+  it("--model overrides every non-Claude tool's server value", async () => {
+    mockServer();
+    await connect.run(["http://gw.test", "--password", "x", "--tools", "opencode,kilo", "--model", "mine/all"]);
+    expect(readJson(path.join(home, ".config", "opencode", "opencode.json")).model).toBe("9router/mine/all");
+    expect(readJson(path.join(home, ".local", "share", "kilo", "auth.json"))["openai-compatible"].model).toBe("mine/all");
   });
 
   it("explicit flags and --no-inherit beat the server's values", async () => {

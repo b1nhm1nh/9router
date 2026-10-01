@@ -13,6 +13,7 @@ const os = require("os");
 
 const home = () => os.homedir();
 const v1 = (baseUrl) => (baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`);
+const isStr = (v) => typeof v === "string" && v.length > 0;
 
 // Drop trailing commas (JSONC) outside string literals, so values like "a,}" survive.
 function stripTrailingCommas(text) {
@@ -97,6 +98,14 @@ const codex = {
   id: "codex",
   name: "OpenAI Codex CLI",
   paths: () => [codexPath()],
+  route: "codex-settings",
+  // GET returns raw TOML text; only trust `model` when the provider is 9router.
+  async serverModel(data) {
+    if (!isStr(data?.config)) return null;
+    const { parseTOML } = await toml();
+    const cfg = parseTOML(data.config) || {};
+    return cfg.model_provider === "9router" && isStr(cfg.model) ? cfg.model : null;
+  },
   async apply({ baseUrl, apiKey, model }) {
     const { parseTOML, stringifyTOML } = await toml();
     const file = codexPath();
@@ -141,6 +150,11 @@ const opencode = {
   id: "opencode",
   name: "OpenCode",
   paths: () => [opencodePath()],
+  route: "opencode-settings",
+  serverModel(data) {
+    const m = data?.config?.model;
+    return isStr(m) && m.startsWith("9router/") ? m.slice("9router/".length) : null;
+  },
   async apply({ baseUrl, apiKey, model }) {
     const file = opencodePath();
     const cfg = readJson(file) || {};
@@ -183,6 +197,11 @@ const droid = {
   id: "droid",
   name: "Factory Droid",
   paths: () => [droidPath()],
+  route: "droid-settings",
+  serverModel(data) {
+    const m = (data?.settings?.customModels || []).find(isDroid9r)?.model;
+    return isStr(m) ? m : null;
+  },
   async apply({ baseUrl, apiKey, model }) {
     const file = droidPath();
     const cfg = readJson(file) || {};
@@ -225,6 +244,11 @@ const crush = {
   id: "crush",
   name: "Crush",
   paths: () => [crushPath()],
+  route: "crush-settings",
+  serverModel(data) {
+    const m = data?.config?.providers?.["9router"]?.models?.[0]?.id;
+    return isStr(m) ? m : null;
+  },
   async apply({ baseUrl, apiKey, model }) {
     const file = crushPath();
     const cfg = readJson(file) || {};
@@ -256,6 +280,8 @@ const kilo = {
   id: "kilo",
   name: "Kilo Code CLI",
   paths: () => [kiloPath()],
+  // No route: the dashboard GET exposes only auth key names, not the model,
+  // so kilo falls back to the shared model.
   async apply({ baseUrl, apiKey, model }) {
     const file = kiloPath();
     const auth = readJson(file) || {};
@@ -283,6 +309,11 @@ const cline = {
   id: "cline",
   name: "Cline CLI",
   paths: () => [clineState(), clineSecrets()],
+  route: "cline-settings",
+  serverModel(data) {
+    const st = data?.settings;
+    return st?.actModeApiProvider === "openai" && isStr(st.openAiModelId) ? st.openAiModelId : null;
+  },
   async apply({ baseUrl, apiKey, model }) {
     const state = readJson(clineState()) || {};
     state.actModeApiProvider = "openai";
