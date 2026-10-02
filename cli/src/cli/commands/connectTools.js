@@ -4,6 +4,8 @@
  * tool configured here looks identical to one applied from the dashboard.
  *
  * Each tool: { id, name, paths(), apply(ctx) → string[] written, reset() → string[] touched }
+ * Optional: route + serverModel(data) to inherit the server's model; needsModel: false
+ * for tools that discover models themselves (omp).
  * ctx: { baseUrl (origin, no /v1), apiKey, model, claudeModels: { envKey: model } }
  */
 
@@ -51,7 +53,7 @@ function writeFile(file, content) {
 
 const writeJson = (file, data) => writeFile(file, JSON.stringify(data, null, 2));
 
-// confbox is ESM-only; loaded lazily so non-codex runs don't need it.
+// confbox (TOML/YAML) is ESM-only; loaded lazily so other tools don't need it.
 async function toml() {
   return import("confbox");
 }
@@ -423,9 +425,122 @@ const cline = {
   },
 };
 
-const TOOLS = [claude, codex, opencode, droid, crush, kilo, cline];
+// ── Pi (pi-coding-agent) ────────────────────────────────────────────────────
+// Prefers ~/.pi/agent/models.json; an existing legacy ~/.pi/models.json is used instead.
+const piPath = () => {
+  const agent = path.join(home(), ".pi", "agent", "models.json");
+  const root = path.join(home(), ".pi", "models.json");
+  return !fs.existsSync(agent) && fs.existsSync(root) ? root : agent;
+};
+
+const pi = {
+  id: "pi",
+  name: "Pi",
+  paths: () => [piPath()],
+  route: "pi-settings",
+  serverModel(data) {
+    const m = data?.config?.providers?.["9router"]?.models?.[0];
+    const id = typeof m === "string" ? m : m?.id;
+    return isStr(id) ? id : null;
+  },
+  async apply({ baseUrl, apiKey, model }) {
+    const file = piPath();
+    const cfg = readJson(file) || {};
+    cfg.providers = cfg.providers || {};
+    cfg.providers["9router"] = {
+      ...(cfg.providers["9router"] || {}),
+      baseUrl: v1(baseUrl),
+      apiKey,
+      api: "openai-completions",
+      models: [{ id: model, name: model, contextWindow: 128000, maxTokens: 16384 }],
+    };
+    writeJson(file, cfg);
+    return [file];
+  },
+  async show() {
+    const p = readJson(piPath())?.providers?.["9router"];
+    const ids = (p?.models || []).map((m) => (typeof m === "string" ? m : m?.id)).filter(isStr);
+    return {
+      baseUrl: p?.baseUrl,
+      apiKey: p?.apiKey,
+      models: ids.length ? { main: ids[0], ...(ids.length > 1 ? { available: ids.join(", ") } : {}) } : {},
+    };
+  },
+  async reset() {
+    const file = piPath();
+    const cfg = readJson(file);
+    if (!cfg?.providers?.["9router"]) return [];
+    delete cfg.providers["9router"];
+    if (Object.keys(cfg.providers).length === 0) delete cfg.providers;
+    rewriteFile(file, JSON.stringify(cfg, null, 2));
+    return [file];
+  },
+};
+
+// ── Oh My Pi ────────────────────────────────────────────────────────────────
+// Proxy discovery lists every server model under /model, so no model is written.
+// The dashboard also mirrors the key into agent.db; models.yml is the primary
+// source, so that best-effort sqlite write is skipped here.
+const ompPath = () => path.join(home(), ".omp", "agent", "models.yml");
+
+async function readYaml(file) {
+  let text;
+  try { text = fs.readFileSync(file, "utf8"); } catch (err) { if (err.code === "ENOENT") return null; throw err; }
+  try {
+    const { parseYAML } = await toml();
+    return parseYAML(text) || {};
+  } catch (err) {
+    throw new Error(`Cannot parse ${file}: ${err.message}`);
+  }
+}
+
+const omp = {
+  id: "omp",
+  name: "Oh My Pi",
+  paths: () => [ompPath()],
+  needsModel: false,
+  async apply({ baseUrl, apiKey }) {
+    const { stringifyYAML } = await toml();
+    const file = ompPath();
+    const cfg = (await readYaml(file)) || {};
+    cfg.providers = cfg.providers || {};
+    cfg.providers["9router"] = {
+      baseUrl: v1(baseUrl),
+      apiKey,
+      api: "openai-completions",
+      authHeader: true,
+      disableStrictTools: true,
+      discovery: { type: "proxy" },
+    };
+    writeFile(file, stringifyYAML(cfg));
+    return [file];
+  },
+  async show() {
+    const p = (await readYaml(ompPath()))?.providers?.["9router"];
+    return {
+      baseUrl: p?.baseUrl,
+      apiKey: p?.apiKey,
+      models: p?.discovery?.type === "proxy" ? { main: "(all server models, via discovery)" } : {},
+    };
+  },
+  async reset() {
+    const { stringifyYAML } = await toml();
+    const file = ompPath();
+    const cfg = await readYaml(file);
+    if (!cfg?.providers?.["9router"]) return [];
+    delete cfg.providers["9router"];
+    if (Object.keys(cfg.providers).length === 0) delete cfg.providers;
+    rewriteFile(file, Object.keys(cfg).length ? stringifyYAML(cfg) : "");
+    return [file];
+  },
+};
+
+const TOOLS = [claude, codex, opencode, droid, crush, kilo, cline, pi, omp];
 const TOOL_IDS = TOOLS.map((t) => t.id);
-const TOOL_ALIASES = { "claude-code": "claude", "claudecode": "claude", "factory": "droid", "kilocode": "kilo" };
+const TOOL_ALIASES = {
+  "claude-code": "claude", "claudecode": "claude", "factory": "droid", "kilocode": "kilo",
+  "pi-coding-agent": "pi", "oh-my-pi": "omp",
+};
 
 function resolveTools(list) {
   const ids = new Set();

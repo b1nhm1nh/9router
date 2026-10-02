@@ -33,7 +33,8 @@ Options:
   --key-name <name>      API key name to reuse/create (default: cli-<hostname>)
   --api-key <key>        Use this API key, skip login + key lookup
   --model <model>        Model for all non-Claude tools (default: each tool's own
-                         model on the server, else the server's OpenCode model)
+                         model on the server, else the server's OpenCode model;
+                         omp needs none — it discovers every server model)
   --fable|--opus|--sonnet|--haiku <model>
                          Override a Claude Code tier (default: the server's value)
   --print-env            Also print OpenAI-compatible env vars for other CLIs
@@ -186,6 +187,9 @@ async function getOrCreateApiKey(server, cookie, keyName) {
   return { key: created.data.key, created: true };
 }
 
+// Non-Claude tools that take a single model id (omp discovers all models itself).
+const needsModel = (t) => t.id !== "claude" && t.needsModel !== false;
+
 /**
  * Model choices the server operator already made, read from the server's own
  * cli-tools config. Only model ids are taken — never the server's baseUrl or
@@ -217,7 +221,7 @@ async function fetchServerModels(server, cookie, tools) {
   const { TOOLS } = require("./connectTools");
   const opencodeTool = TOOLS.find((t) => t.id === "opencode");
   const wanted = tools.filter((t) => t.route);
-  if (!wanted.includes(opencodeTool) && tools.some((t) => t.id !== "claude")) wanted.push(opencodeTool);
+  if (!wanted.includes(opencodeTool) && tools.some(needsModel)) wanted.push(opencodeTool);
 
   await Promise.all(wanted.map(async (t) => {
     const data = await get(t.route);
@@ -354,7 +358,7 @@ async function runConnect(argv) {
   const toolModels = {};
   const fromOpencode = [];
   for (const t of tools) {
-    if (t.id === "claude") continue;
+    if (!needsModel(t)) continue;
     toolModels[t.id] = opts.model || serverModels.byTool[t.id] || serverModels.shared || null;
     if (!opts.model && !serverModels.byTool[t.id] && serverModels.shared) fromOpencode.push(t.id);
   }
@@ -366,7 +370,7 @@ async function runConnect(argv) {
   let failed = 0;
   let skipped = 0;
   for (const t of tools) {
-    if (t.id !== "claude" && !toolModels[t.id]) {
+    if (needsModel(t) && !toolModels[t.id]) {
       skipped++;
       console.log(`⏭  ${t.name}: no model configured on the server — skipped (pass --model <model>)`);
       continue;
@@ -390,6 +394,7 @@ async function runConnect(argv) {
     }
   }
   for (const [id, m] of Object.entries(toolModels)) if (m) console.log(`   ${id} model: ${m}`);
+  if (tools.some((t) => t.id === "omp")) console.log("   omp models: every server model, listed under 9router in /model");
   console.log(`   Restart the tools to apply. Undo: npx 9router connect --reset --tools ${tools.map((t) => t.id).join(",")}`);
 
   if (opts.printEnv) {

@@ -141,6 +141,44 @@ describe("connect tool writers", () => {
     expect(tool("crush").serverModel({ config: { providers: { "9router": { models: [{ id: "d" }] } } } })).toBe("d");
     expect(tool("cline").serverModel({ settings: { actModeApiProvider: "cline", openAiModelId: "e" } })).toBeNull();
     expect(tool("kilo").serverModel).toBeUndefined();
+    expect(tool("pi").serverModel({ config: { providers: { "9router": { models: [{ id: "f" }] } } } })).toBe("f");
+    expect(tool("pi").serverModel({ config: { providers: { other: { models: [{ id: "f" }] } } } })).toBeNull();
+  });
+
+  it("pi keeps other providers and writes the 9router model list", async () => {
+    const f = path.join(home, ".pi", "agent", "models.json");
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, JSON.stringify({ providers: { mine: { baseUrl: "http://x" } } }));
+    await tool("pi").apply(CTX);
+    const p = readJson(f).providers;
+    expect(p.mine).toEqual({ baseUrl: "http://x" });
+    expect(p["9router"]).toMatchObject({ baseUrl: "http://gw.test:20128/v1", apiKey: CTX.apiKey, api: "openai-completions" });
+    expect(p["9router"].models.map((m) => m.id)).toEqual([CTX.model]);
+    await tool("pi").reset();
+    expect(readJson(f)).toEqual({ providers: { mine: { baseUrl: "http://x" } } });
+  });
+
+  it("pi uses a legacy ~/.pi/models.json when only that exists", async () => {
+    const legacy = path.join(home, ".pi", "models.json");
+    fs.mkdirSync(path.dirname(legacy), { recursive: true });
+    fs.writeFileSync(legacy, "{}");
+    expect(await tool("pi").apply(CTX)).toEqual([legacy]);
+  });
+
+  it("omp writes a proxy-discovery provider to models.yml, keeps other YAML", async () => {
+    const f = path.join(home, ".omp", "agent", "models.yml");
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, "providers:\n  mine:\n    baseUrl: http://x\ntheme: dark\n");
+    await tool("omp").apply(CTX);
+    const text = fs.readFileSync(f, "utf8");
+    expect(text).toContain("theme: dark");
+    expect(text).toMatch(/9router:\n\s+baseUrl: http:\/\/gw\.test:20128\/v1/);
+    expect(text).toMatch(/discovery:\n\s+type: proxy/);
+    await tool("omp").reset();
+    const after = fs.readFileSync(f, "utf8");
+    expect(after).not.toContain("9router");
+    expect(after).toContain("mine:");
+    expect(after).toContain("theme: dark");
   });
 
   it("cline uses base URL without /v1 and reset reports both files", async () => {
@@ -269,6 +307,14 @@ describe("connect run()", () => {
       expect(text).toContain(MY_KEY);
       expect(text).not.toContain(SERVER_KEY);
     }
+  });
+
+  it("omp needs no model: configured even when the server has none", async () => {
+    unreadableServer();
+    expect(await connect.run(["http://gw.test", "--password", "x", "--tools", "omp"])).toBe(0);
+    const text = fs.readFileSync(path.join(home, ".omp", "agent", "models.yml"), "utf8");
+    expect(text).toContain(MY_KEY);
+    expect(text).not.toContain(SERVER_KEY);
   });
 
   it("--model overrides every non-Claude tool's server value", async () => {
