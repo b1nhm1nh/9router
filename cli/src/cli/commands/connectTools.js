@@ -58,10 +58,10 @@ async function toml() {
 
 // ── Claude Code ─────────────────────────────────────────────────────────────
 const CLAUDE_MODELS = [
-  { flag: "fable", envKey: "ANTHROPIC_DEFAULT_FABLE_MODEL", defaultValue: "cc/claude-fable-5-1" },
-  { flag: "opus", envKey: "ANTHROPIC_DEFAULT_OPUS_MODEL", defaultValue: "cc/claude-opus-5-5" },
-  { flag: "sonnet", envKey: "ANTHROPIC_DEFAULT_SONNET_MODEL", defaultValue: "cc/claude-sonnet-5-5" },
-  { flag: "haiku", envKey: "ANTHROPIC_DEFAULT_HAIKU_MODEL", defaultValue: "cc/claude-haiku-4-5-20251001" },
+  { flag: "fable", envKey: "ANTHROPIC_DEFAULT_FABLE_MODEL" },
+  { flag: "opus", envKey: "ANTHROPIC_DEFAULT_OPUS_MODEL" },
+  { flag: "sonnet", envKey: "ANTHROPIC_DEFAULT_SONNET_MODEL" },
+  { flag: "haiku", envKey: "ANTHROPIC_DEFAULT_HAIKU_MODEL" },
 ];
 const CLAUDE_RESET_KEYS = ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", ...CLAUDE_MODELS.map((m) => m.envKey)];
 const claudePath = () => path.join(home(), ".claude", "settings.json");
@@ -74,7 +74,13 @@ const claude = {
     const file = claudePath();
     const cur = readJson(file) || {};
     cur.hasCompletedOnboarding = true;
-    cur.env = { ...(cur.env || {}), ANTHROPIC_BASE_URL: v1(baseUrl), ANTHROPIC_AUTH_TOKEN: apiKey, ...claudeModels };
+    cur.env = { ...(cur.env || {}), ANTHROPIC_BASE_URL: v1(baseUrl), ANTHROPIC_AUTH_TOKEN: apiKey };
+    // A tier with no model (null) is removed so Claude Code uses its own default
+    // instead of a stale value from an earlier run.
+    for (const m of CLAUDE_MODELS) {
+      if (claudeModels[m.envKey]) cur.env[m.envKey] = claudeModels[m.envKey];
+      else delete cur.env[m.envKey];
+    }
     writeJson(file, cur);
     return [file];
   },

@@ -10,8 +10,6 @@
 const os = require("os");
 const { TOOL_IDS, CLAUDE_MODELS, resolveTools } = require("./connectTools");
 
-const DEFAULT_MODEL = "cc/claude-sonnet-5-5";
-
 const HELP = `
 Usage: 9router connect <server-url> [options]
 
@@ -30,14 +28,19 @@ Options:
   --key-name <name>      API key name to reuse/create (default: cli-<hostname>)
   --api-key <key>        Use this API key, skip login + key lookup
   --model <model>        Model for all non-Claude tools (default: each tool's own
-                         model on the server, else the server's OpenCode model,
-                         else ${DEFAULT_MODEL})
+                         model on the server, else the server's OpenCode model)
   --fable|--opus|--sonnet|--haiku <model>
-                         Override Claude Code model mapping
-  --no-inherit           Ignore the server's configured models, use built-in defaults
+                         Override a Claude Code tier (default: the server's value)
   --print-env            Also print OpenAI-compatible env vars for other CLIs
   --reset                Remove 9router settings from the selected tools and exit
   -h, --help             Show this help
+
+Models come from the server's own CLI-tools config (set on its dashboard).
+Nothing is hardcoded: a Claude tier the server leaves unset is left unset,
+and a non-Claude tool with no model anywhere is skipped. Flags override:
+
+  npx 9router connect http://<server-host>:20128 --tools claude --sonnet cc/claude-sonnet-5-5
+  npx 9router connect http://<server-host>:20128 --tools codex,opencode --model ocg/deepseek-flash
 `;
 
 function parseArgs(argv) {
@@ -59,7 +62,6 @@ function parseArgs(argv) {
     else if (a === "--api-key") opts.apiKey = next();
     else if (a === "--tools") opts.tools = next().split(",");
     else if (a === "--model") opts.model = next();
-    else if (a === "--no-inherit") opts.noInherit = true;
     else if (a === "--print-env") opts.printEnv = true;
     else if (a === "--reset") opts.reset = true;
     else if (a === "-h" || a === "--help") opts.help = true;
@@ -273,12 +275,10 @@ async function runConnect(argv) {
     console.log(`• ${result.created ? "Created" : "Reusing"} API key "${opts.keyName}" (${maskKey(apiKey)})`);
   }
 
-  // Inherit the server's configured models, unless --no-inherit or an explicit flag.
-  const serverModels = opts.noInherit
-    ? { claude: {}, byTool: {}, shared: null }
-    : await fetchServerModels(server, cookie, tools);
-  if (!opts.noInherit && !cookie) {
-    console.log("• --api-key given: skipping server model lookup (needs a dashboard login)");
+  // Models always come from the server's own cli-tools config; flags override.
+  const serverModels = await fetchServerModels(server, cookie, tools);
+  if (!cookie) {
+    console.log("• --api-key given: can't read the server's models (needs a dashboard login) — pass model flags");
   }
 
   const available = await listModels(server, apiKey);
@@ -289,36 +289,39 @@ async function runConnect(argv) {
     }
   };
 
-  const inherited = [];
+  // Claude tier: flag > server value > unset (Claude Code then uses its own default).
   const claudeModels = {};
+  const claudeUnset = [];
   if (tools.some((t) => t.id === "claude")) {
     for (const m of CLAUDE_MODELS) {
-      if (opts.models[m.flag]) claudeModels[m.envKey] = opts.models[m.flag];
-      else if (serverModels.claude[m.flag]) {
-        claudeModels[m.envKey] = serverModels.claude[m.flag];
-        inherited.push(m.flag);
-      } else claudeModels[m.envKey] = m.defaultValue;
-      warnMissing(`claude ${m.flag}`, claudeModels[m.envKey], `--${m.flag}`);
+      const model = opts.models[m.flag] || serverModels.claude[m.flag] || null;
+      claudeModels[m.envKey] = model;
+      if (model) warnMissing(`claude ${m.flag}`, model, `--${m.flag}`);
+      else claudeUnset.push(m.flag);
     }
   }
-  // Per tool: --model > that tool's own server config > server's OpenCode model > default.
+  // Other tools: --model > that tool's own server model > server's OpenCode model.
+  // No hardcoded fallback — a tool with no model anywhere is skipped.
   const toolModels = {};
+  const fromOpencode = [];
   for (const t of tools) {
     if (t.id === "claude") continue;
-    if (opts.model) toolModels[t.id] = opts.model;
-    else if (serverModels.byTool[t.id]) {
-      toolModels[t.id] = serverModels.byTool[t.id];
-      inherited.push(t.id);
-    } else if (serverModels.shared) {
-      toolModels[t.id] = serverModels.shared;
-      inherited.push(`${t.id}←opencode`);
-    } else toolModels[t.id] = DEFAULT_MODEL;
+    toolModels[t.id] = opts.model || serverModels.byTool[t.id] || serverModels.shared || null;
+    if (!opts.model && !serverModels.byTool[t.id] && serverModels.shared) fromOpencode.push(t.id);
   }
-  for (const m of new Set(Object.values(toolModels))) warnMissing("model", m, "--model");
-  if (inherited.length) console.log(`• Using the server's configured models (${inherited.join(", ")}) — override with flags, or use --no-inherit`);
+  for (const m of new Set(Object.values(toolModels).filter(Boolean))) warnMissing("model", m, "--model");
+  if (fromOpencode.length) {
+    console.log(`• ${fromOpencode.join(", ")}: no own model on the server — using its OpenCode model`);
+  }
 
   let failed = 0;
+  let skipped = 0;
   for (const t of tools) {
+    if (t.id !== "claude" && !toolModels[t.id]) {
+      skipped++;
+      console.log(`⏭  ${t.name}: no model configured on the server — skipped (pass --model <model>)`);
+      continue;
+    }
     const ctx = { baseUrl: server, apiKey, model: toolModels[t.id], claudeModels };
     try {
       const files = await t.apply(ctx);
@@ -330,9 +333,14 @@ async function runConnect(argv) {
   }
   console.log(`   Base URL: ${server}/v1`);
   if (tools.some((t) => t.id === "claude")) {
-    for (const m of CLAUDE_MODELS) console.log(`   ${m.envKey}=${claudeModels[m.envKey]}`);
+    for (const m of CLAUDE_MODELS) {
+      if (claudeModels[m.envKey]) console.log(`   ${m.envKey}=${claudeModels[m.envKey]}`);
+    }
+    if (claudeUnset.length) {
+      console.log(`   Claude ${claudeUnset.join(", ")}: not set on the server — Claude Code's own default applies (or pass --${claudeUnset[0]} <model>)`);
+    }
   }
-  for (const [id, m] of Object.entries(toolModels)) console.log(`   ${id} model: ${m}`);
+  for (const [id, m] of Object.entries(toolModels)) if (m) console.log(`   ${id} model: ${m}`);
   console.log(`   Restart the tools to apply. Undo: npx 9router connect --reset --tools ${tools.map((t) => t.id).join(",")}`);
 
   if (opts.printEnv) {
@@ -340,7 +348,8 @@ async function runConnect(argv) {
     console.log(`   OPENAI_BASE_URL=${server}/v1`);
     console.log(`   OPENAI_API_KEY=${apiKey}`);
   }
-  return failed ? 1 : 0;
+  // A skipped tool was not configured, so the run did not do what was asked.
+  return failed || skipped ? 1 : 0;
 }
 
 module.exports = { run, __test__: { parseArgs, normalizeServerUrl, extractAuthCookie, maskKey, Cancelled } };

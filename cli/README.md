@@ -102,9 +102,54 @@ npx 9router connect --reset --tools claude,codex                     # undo
 
 It logs in with the dashboard password (hidden prompt), reuses or creates an API key named `cli-<hostname>`, and writes each tool's config (backing up the original once as `*.bak-9router`).
 
-Models are inherited from the server's own CLI-tools configuration, so a client gets whatever the operator already picked on the dashboard. Override a tier with `--opus/--sonnet/--haiku/--fable` (or `--model` for non-Claude tools), or ignore the server's choices with `--no-inherit`.
+Supported tools: `claude`, `codex`, `opencode`, `droid`, `crush`, `kilo`, `cline`, or `all`.
 
-Supported: `claude`, `codex`, `opencode`, `droid`, `crush`, `kilo`, `cline`, or `all`. Other options: `--api-key`, `--key-name`, `--print-env`. See `9router connect --help`.
+### Models
+
+Models come from the **server's own CLI-tools configuration**, so a client gets whatever the operator already picked on the dashboard. Nothing is hardcoded.
+
+| Tool | Model taken from (first match wins) |
+|---|---|
+| `claude` | tier flag (`--opus` …) → server's Claude tier → *left unset* (Claude Code's own default) |
+| others | `--model` → that tool's own model on the server → server's OpenCode model → *tool skipped* |
+
+`kilo` has no readable model on the server, so it always uses `--model` or the OpenCode model. A Claude tier the server doesn't set is removed from your config rather than kept from an earlier run. A skipped tool makes the command exit `1`.
+
+### Overriding the server's models
+
+```bash
+# One Claude tier; the other tiers still come from the server
+npx 9router connect http://<server-host>:20128 --tools claude --sonnet cc/claude-sonnet-5-5
+
+# Every Claude tier
+npx 9router connect http://<server-host>:20128 --tools claude \
+  --fable cc/claude-fable-5-1 --opus cc/claude-opus-5-5 \
+  --sonnet cc/claude-sonnet-5-5 --haiku cc/claude-haiku-4-5-20251001
+
+# All non-Claude tools at once
+npx 9router connect http://<server-host>:20128 --tools codex,opencode,kilo --model ocg/deepseek-flash
+
+# Claude and other tools in one run
+npx 9router connect http://<server-host>:20128 --tools claude,codex --opus cc/claude-opus-5-5 --model gpt-6
+
+# A different model per tool: --model covers every non-Claude tool in a run, so run once per tool
+npx 9router connect http://<server-host>:20128 --tools codex --model gpt-6
+npx 9router connect http://<server-host>:20128 --tools opencode --model ocg/glm-5.3
+```
+
+A model the server doesn't list is still written, with a `not listed by server` warning. To see the ids it serves: `curl http://<server-host>:20128/v1/models -H "Authorization: Bearer <your key>"`.
+
+### Other options
+
+| Option | Purpose |
+|---|---|
+| `--password <pw>` | Dashboard password (or `NINE_ROUTER_PASSWORD`); prompted if omitted — preferred, keeps it out of shell history |
+| `--api-key <key>` | Use this key and skip login. The server's models can't be read without a login, so pass model flags |
+| `--key-name <name>` | API key name to reuse/create (default `cli-<hostname>`) |
+| `--print-env` | Also print `OPENAI_BASE_URL` / `OPENAI_API_KEY` for other CLIs |
+| `--reset` | Remove the 9router settings from the selected tools |
+
+See `9router connect --help` for the full list.
 
 > ⚠️ Over plain `http://` the password and API key are sent unencrypted — use a trusted LAN/VPN or put HTTPS in front. The API key is stored in each tool's config file.
 

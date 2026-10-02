@@ -18,8 +18,6 @@ const CTX = {
   claudeModels: { ANTHROPIC_DEFAULT_OPUS_MODEL: "cc/claude-opus-5" },
 };
 const tool = (id) => tools.TOOLS.find((t) => t.id === id);
-// Read from the source of truth so a default-model bump can't break these tests.
-const defaultFor = (flag) => tools.CLAUDE_MODELS.find((m) => m.flag === flag).defaultValue;
 const readJson = (p) => JSON.parse(fs.readFileSync(p, "utf8"));
 
 describe("connect helpers", () => {
@@ -199,15 +197,16 @@ describe("connect run()", () => {
     });
   }
 
-  it("inherits the server's configured models instead of the built-in defaults", async () => {
+  it("takes models from the server — nothing hardcoded", async () => {
     mockServer();
     expect(await connect.run(["http://gw.test", "--password", "x", "--tools", "claude,opencode"])).toBe(0);
 
     const env = readJson(path.join(home, ".claude", "settings.json")).env;
     expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("srv/opus");
     expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("srv/sonnet[1m]");
-    // Tiers the server did not configure keep the built-in default.
-    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe(defaultFor("haiku"));
+    // Tiers the server leaves unset stay unset — no invented model id.
+    expect(env).not.toHaveProperty("ANTHROPIC_DEFAULT_HAIKU_MODEL");
+    expect(env).not.toHaveProperty("ANTHROPIC_DEFAULT_FABLE_MODEL");
     expect(readJson(path.join(home, ".config", "opencode", "opencode.json")).model).toBe("9router/srv/default");
 
     // The server's own key and loopback base URL must not leak into our config.
@@ -215,12 +214,21 @@ describe("connect run()", () => {
     expect(written).toContain(MY_KEY);
     expect(written).not.toContain(SERVER_KEY);
     expect(env.ANTHROPIC_BASE_URL).toBe("http://gw.test/v1");
-    // The "[1m]" marker is stripped before the availability check, so the
-    // sonnet tier draws no warning (fable/haiku fall back to defaults the
-    // fake server does not list, and those warnings are correct).
+    // The "[1m]" marker is stripped before the availability check, and unset
+    // tiers aren't checked at all, so this run draws no warning.
     const warnings = console.log.mock.calls.map((c) => c[0]).filter((l) => String(l).includes("not listed by server"));
-    expect(warnings.some((l) => l.includes("sonnet"))).toBe(false);
-    expect(warnings.some((l) => l.includes("opus"))).toBe(false);
+    expect(warnings).toEqual([]);
+  });
+
+  it("clears a stale Claude tier the server no longer sets", async () => {
+    const f = path.join(home, ".claude", "settings.json");
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, JSON.stringify({ env: { ANTHROPIC_DEFAULT_HAIKU_MODEL: "old/haiku", KEEP: "1" } }));
+    mockServer();
+    await connect.run(["http://gw.test", "--password", "x", "--tools", "claude"]);
+    const env = readJson(f).env;
+    expect(env).not.toHaveProperty("ANTHROPIC_DEFAULT_HAIKU_MODEL");
+    expect(env.KEEP).toBe("1");
   });
 
   it("each tool inherits its OWN server model, falling back to OpenCode's", async () => {
@@ -270,17 +278,18 @@ describe("connect run()", () => {
     expect(readJson(path.join(home, ".local", "share", "kilo", "auth.json"))["openai-compatible"].model).toBe("mine/all");
   });
 
-  it("explicit flags and --no-inherit beat the server's values", async () => {
+  it("an explicit tier flag beats the server's value", async () => {
     mockServer();
     await connect.run(["http://gw.test", "--password", "x", "--tools", "claude", "--opus", "mine/opus"]);
     expect(readJson(path.join(home, ".claude", "settings.json")).env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("mine/opus");
-
-    await connect.run(["http://gw.test", "--password", "x", "--tools", "claude", "--no-inherit"]);
-    expect(readJson(path.join(home, ".claude", "settings.json")).env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe(defaultFor("opus"));
   });
 
-  it("falls back to defaults when the server's cli-tools config is unreadable", async () => {
-    mockServer().mockImplementation((url) => {
+  it("--no-inherit is no longer accepted", async () => {
+    await expect(connect.run(["http://gw.test", "--no-inherit"])).rejects.toThrow(/Unknown option/);
+  });
+
+  function unreadableServer() {
+    return mockServer().mockImplementation((url) => {
       const u = String(url);
       const json = (b, h) => Promise.resolve(new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json", ...h } }));
       if (u.endsWith("/api/auth/login")) return json({ success: true }, { "set-cookie": "auth_token=t" });
@@ -288,8 +297,25 @@ describe("connect run()", () => {
       if (u.includes("/api/cli-tools/")) return Promise.resolve(new Response("nope", { status: 500 }));
       return json({ data: [] });
     });
+  }
+
+  it("server config unreadable: Claude still gets URL + key, tiers left unset", async () => {
+    unreadableServer();
     expect(await connect.run(["http://gw.test", "--password", "x", "--tools", "claude"])).toBe(0);
-    expect(readJson(path.join(home, ".claude", "settings.json")).env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe(defaultFor("opus"));
+    const env = readJson(path.join(home, ".claude", "settings.json")).env;
+    expect(env.ANTHROPIC_BASE_URL).toBe("http://gw.test/v1");
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe(MY_KEY);
+    for (const m of tools.CLAUDE_MODELS) expect(env).not.toHaveProperty(m.envKey);
+  });
+
+  it("a non-Claude tool with no model anywhere is skipped and exits 1", async () => {
+    unreadableServer();
+    expect(await connect.run(["http://gw.test", "--password", "x", "--tools", "opencode"])).toBe(1);
+    expect(fs.existsSync(path.join(home, ".config", "opencode", "opencode.json"))).toBe(false);
+    expect(console.log.mock.calls.map((c) => c[0]).some((l) => String(l).includes("skipped"))).toBe(true);
+    // ...unless the user says which model to use.
+    expect(await connect.run(["http://gw.test", "--password", "x", "--tools", "opencode", "--model", "mine/m"])).toBe(0);
+    expect(readJson(path.join(home, ".config", "opencode", "opencode.json")).model).toBe("9router/mine/m");
   });
 
   it("reset keeps going when one tool fails and returns 1", async () => {
