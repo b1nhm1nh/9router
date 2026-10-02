@@ -7,7 +7,9 @@
  * The password and API key are never printed (key is masked).
  */
 
+const fs = require("fs");
 const os = require("os");
+const path = require("path");
 const { TOOL_IDS, CLAUDE_MODELS, resolveTools } = require("./connectTools");
 
 const HELP = `
@@ -25,6 +27,9 @@ Options:
                          ${TOOL_IDS.join(", ")}, all
   --password <pw>        Dashboard password (or env NINE_ROUTER_PASSWORD;
                          prompted if omitted — preferred, keeps it out of shell history)
+  --save                 After a successful login, save the password for this server
+                         to ~/.9router/connect.env (plain text, mode 600) so later
+                         runs skip the prompt. Delete that file to forget it.
   --key-name <name>      API key name to reuse/create (default: cli-<hostname>)
   --api-key <key>        Use this API key, skip login + key lookup
   --model <model>        Model for all non-Claude tools (default: each tool's own
@@ -62,6 +67,7 @@ function parseArgs(argv) {
     else if (a === "--api-key") opts.apiKey = next();
     else if (a === "--tools") opts.tools = next().split(",");
     else if (a === "--model") opts.model = next();
+    else if (a === "--save") opts.save = true;
     else if (a === "--print-env") opts.printEnv = true;
     else if (a === "--reset") opts.reset = true;
     else if (a === "-h" || a === "--help") opts.help = true;
@@ -83,6 +89,36 @@ function normalizeServerUrl(input) {
 function maskKey(key) {
   if (!key || key.length < 12) return "****";
   return `${key.slice(0, 6)}…${key.slice(-4)}`;
+}
+
+// Saved login (`--save`): dotenv file in the CLI data dir, bound to one server so a
+// password is never sent to a different host.
+function savedEnvPath() {
+  if (process.env.DATA_DIR) return path.join(process.env.DATA_DIR, "connect.env");
+  const base = process.platform === "win32"
+    ? path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "9router")
+    : path.join(os.homedir(), ".9router");
+  return path.join(base, "connect.env");
+}
+
+function loadSavedPassword(server) {
+  let text;
+  try { text = fs.readFileSync(savedEnvPath(), "utf8"); } catch { return null; }
+  const env = {};
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^([A-Z_]+)=(.*)$/.exec(line);
+    if (m) env[m[1]] = JSON.parse(m[2]);
+  }
+  return env.NINE_ROUTER_SERVER === server && env.NINE_ROUTER_PASSWORD ? env.NINE_ROUTER_PASSWORD : null;
+}
+
+function savePassword(server, password) {
+  const file = savedEnvPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const body = `NINE_ROUTER_SERVER=${JSON.stringify(server)}\nNINE_ROUTER_PASSWORD=${JSON.stringify(password)}\n`;
+  fs.writeFileSync(file, body, { mode: 0o600 });
+  fs.chmodSync(file, 0o600); // mode only applies on create; tighten a pre-existing file too
+  return file;
 }
 
 // Enquirer rejects with an empty value on Ctrl+C / Esc.
@@ -267,9 +303,19 @@ async function runConnect(argv) {
   if (apiKey) {
     console.log("• Using provided API key");
   } else {
-    const password = opts.password ?? (await promptPassword());
+    const saved = opts.password ? null : loadSavedPassword(server);
+    if (saved) console.log(`• Using saved password (${savedEnvPath()})`);
+    const password = opts.password ?? saved ?? (await promptPassword());
     console.log(`• Logging in to ${server}`);
-    cookie = await login(server, password);
+    try {
+      cookie = await login(server, password);
+    } catch (err) {
+      if (saved) err.message += ` — saved password may be stale; delete ${savedEnvPath()} or pass --password`;
+      throw err;
+    }
+    if (opts.save && password !== saved) {
+      console.log(`• Saved password to ${savePassword(server, password)} (plain text, mode 600)`);
+    }
     const result = await getOrCreateApiKey(server, cookie, opts.keyName);
     apiKey = result.key;
     console.log(`• ${result.created ? "Created" : "Reusing"} API key "${opts.keyName}" (${maskKey(apiKey)})`);
@@ -352,4 +398,4 @@ async function runConnect(argv) {
   return failed || skipped ? 1 : 0;
 }
 
-module.exports = { run, __test__: { parseArgs, normalizeServerUrl, extractAuthCookie, maskKey, Cancelled } };
+module.exports = { run, __test__: { parseArgs, normalizeServerUrl, extractAuthCookie, maskKey, Cancelled, loadSavedPassword, savedEnvPath } };

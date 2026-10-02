@@ -318,6 +318,33 @@ describe("connect run()", () => {
     expect(readJson(path.join(home, ".config", "opencode", "opencode.json")).model).toBe("9router/mine/m");
   });
 
+  it("--save stores the password (mode 600) bound to the server, and later runs reuse it", async () => {
+    vi.stubEnv("DATA_DIR", "");
+    vi.stubEnv("NINE_ROUTER_PASSWORD", "");
+    const fetchSpy = mockServer();
+    expect(await connect.run(["http://gw.test", "--password", "s3cr\"et", "--save", "--tools", "claude"])).toBe(0);
+    const file = connect.__test__.savedEnvPath();
+    expect(file).toBe(path.join(home, ".9router", "connect.env"));
+    if (process.platform !== "win32") expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(connect.__test__.loadSavedPassword("http://gw.test")).toBe("s3cr\"et");
+    // Bound to its server: never offered to another host.
+    expect(connect.__test__.loadSavedPassword("http://evil.test")).toBe(null);
+
+    fetchSpy.mockClear();
+    expect(await connect.run(["http://gw.test", "--tools", "claude"])).toBe(0);
+    const loginCall = fetchSpy.mock.calls.find(([u]) => String(u).endsWith("/api/auth/login"));
+    expect(JSON.parse(loginCall[1].body).password).toBe("s3cr\"et");
+    vi.unstubAllEnvs();
+  });
+
+  it("without --save nothing is written", async () => {
+    vi.stubEnv("DATA_DIR", "");
+    mockServer();
+    expect(await connect.run(["http://gw.test", "--password", "x", "--tools", "claude"])).toBe(0);
+    expect(fs.existsSync(connect.__test__.savedEnvPath())).toBe(false);
+    vi.unstubAllEnvs();
+  });
+
   it("reset keeps going when one tool fails and returns 1", async () => {
     const f = path.join(home, ".codex", "config.toml");
     fs.mkdirSync(path.dirname(f), { recursive: true });
