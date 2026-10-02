@@ -318,13 +318,24 @@ describe("connect run()", () => {
     expect(readJson(path.join(home, ".config", "opencode", "opencode.json")).model).toBe("9router/mine/m");
   });
 
-  it("--save stores the password (mode 600) bound to the server, and later runs reuse it", async () => {
+  // savedEnvPath() reads %APPDATA% on Windows, not homedir(), so point both at
+  // the temp home — otherwise these tests write into the real user profile.
+  const isolateDataDir = () => {
     vi.stubEnv("DATA_DIR", "");
+    vi.stubEnv("APPDATA", path.join(home, "AppData", "Roaming"));
+  };
+  const expectedEnvPath = () => (process.platform === "win32"
+    ? path.join(home, "AppData", "Roaming", "9router", "connect.env")
+    : path.join(home, ".9router", "connect.env"));
+
+  it("--save stores the password (mode 600) bound to the server, and later runs reuse it", async () => {
+    isolateDataDir();
     vi.stubEnv("NINE_ROUTER_PASSWORD", "");
     const fetchSpy = mockServer();
     expect(await connect.run(["http://gw.test", "--password", "s3cr\"et", "--save", "--tools", "claude"])).toBe(0);
     const file = connect.__test__.savedEnvPath();
-    expect(file).toBe(path.join(home, ".9router", "connect.env"));
+    expect(file).toBe(expectedEnvPath());
+    expect(file.startsWith(home)).toBe(true);
     if (process.platform !== "win32") expect(fs.statSync(file).mode & 0o777).toBe(0o600);
     expect(connect.__test__.loadSavedPassword("http://gw.test")).toBe("s3cr\"et");
     // Bound to its server: never offered to another host.
@@ -338,10 +349,19 @@ describe("connect run()", () => {
   });
 
   it("without --save nothing is written", async () => {
-    vi.stubEnv("DATA_DIR", "");
+    isolateDataDir();
     mockServer();
     expect(await connect.run(["http://gw.test", "--password", "x", "--tools", "claude"])).toBe(0);
     expect(fs.existsSync(connect.__test__.savedEnvPath())).toBe(false);
+    vi.unstubAllEnvs();
+  });
+
+  it("a hand-edited saved file with a bare value doesn't crash", async () => {
+    isolateDataDir();
+    const file = expectedEnvPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "NINE_ROUTER_SERVER=http://gw.test\nNINE_ROUTER_PASSWORD=bare-value\n");
+    expect(connect.__test__.loadSavedPassword("http://gw.test")).toBe("bare-value");
     vi.unstubAllEnvs();
   });
 

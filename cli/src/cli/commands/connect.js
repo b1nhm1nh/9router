@@ -107,7 +107,10 @@ function loadSavedPassword(server) {
   const env = {};
   for (const line of text.split(/\r?\n/)) {
     const m = /^([A-Z_]+)=(.*)$/.exec(line);
-    if (m) env[m[1]] = JSON.parse(m[2]);
+    if (!m) continue;
+    // Values are written JSON-quoted; accept a hand-edited bare value too
+    // rather than crashing the whole command on JSON.parse.
+    try { env[m[1]] = JSON.parse(m[2]); } catch { env[m[1]] = m[2]; }
   }
   return env.NINE_ROUTER_SERVER === server && env.NINE_ROUTER_PASSWORD ? env.NINE_ROUTER_PASSWORD : null;
 }
