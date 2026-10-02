@@ -84,6 +84,13 @@ const claude = {
     writeJson(file, cur);
     return [file];
   },
+  async show() {
+    const env = readJson(claudePath())?.env || {};
+    const models = {};
+    if (isStr(env.ANTHROPIC_MODEL)) models.main = env.ANTHROPIC_MODEL;
+    for (const m of CLAUDE_MODELS) if (isStr(env[m.envKey])) models[m.flag] = env[m.envKey];
+    return { baseUrl: env.ANTHROPIC_BASE_URL, apiKey: env.ANTHROPIC_AUTH_TOKEN, models };
+  },
   async reset() {
     const file = claudePath();
     const cur = readJson(file);
@@ -133,6 +140,28 @@ const codex = {
     writeFile(file, stringifyTOML(cfg));
     return [file];
   },
+  async show() {
+    let cfg;
+    try {
+      const { parseTOML } = await toml();
+      cfg = parseTOML(fs.readFileSync(codexPath(), "utf8")) || {};
+    } catch (err) {
+      if (err.code === "ENOENT") return {};
+      throw new Error(`Cannot parse ${codexPath()}: ${err.message}`);
+    }
+    const p = cfg.model_providers?.["9router"];
+    const auth = p?.http_headers?.Authorization;
+    return {
+      baseUrl: p?.base_url,
+      apiKey: isStr(auth) ? auth.replace(/^Bearer\s+/i, "") : undefined,
+      models: {
+        ...(isStr(cfg.model) ? { main: cfg.model } : {}),
+        ...(isStr(cfg.agents?.default_subagent_model) ? { subagent: cfg.agents.default_subagent_model } : {}),
+      },
+      // Codex only routes through 9router when this provider is the active one.
+      active: cfg.model_provider === "9router",
+    };
+  },
   async reset() {
     const { parseTOML, stringifyTOML } = await toml();
     const file = codexPath();
@@ -179,6 +208,16 @@ const opencode = {
     };
     writeJson(file, cfg);
     return [file];
+  },
+  async show() {
+    const cfg = readJson(opencodePath()) || {};
+    const p = cfg.provider?.["9router"];
+    const models = {};
+    if (isStr(cfg.model)) models.main = cfg.model;
+    if (isStr(cfg.agent?.explorer?.model)) models.explorer = cfg.agent.explorer.model;
+    const listed = Object.keys(p?.models || {});
+    if (listed.length) models.available = listed.join(", ");
+    return { baseUrl: p?.options?.baseURL, apiKey: p?.options?.apiKey, models, active: !!cfg.model?.startsWith("9router/") };
   },
   async reset() {
     const file = opencodePath();
@@ -230,6 +269,14 @@ const droid = {
     writeJson(file, cfg);
     return [file];
   },
+  async show() {
+    const ours = (readJson(droidPath())?.customModels || []).filter(isDroid9r);
+    return {
+      baseUrl: ours[0]?.baseUrl,
+      apiKey: ours[0]?.apiKey,
+      models: ours.length ? { main: ours[0].model, ...(ours.length > 1 ? { available: ours.map((m) => m.model).join(", ") } : {}) } : {},
+    };
+  },
   async reset() {
     const file = droidPath();
     const cfg = readJson(file);
@@ -268,6 +315,11 @@ const crush = {
     writeJson(file, cfg);
     return [file];
   },
+  async show() {
+    const p = readJson(crushPath())?.providers?.["9router"];
+    const ids = (p?.models || []).map((m) => m.id).filter(isStr);
+    return { baseUrl: p?.base_url, apiKey: p?.api_key, models: ids.length ? { main: ids[0] } : {} };
+  },
   async reset() {
     const file = crushPath();
     const cfg = readJson(file);
@@ -294,6 +346,10 @@ const kilo = {
     auth["openai-compatible"] = { type: "api-key", apiKey, baseUrl: v1(baseUrl), model };
     writeJson(file, auth);
     return [file];
+  },
+  async show() {
+    const a = readJson(kiloPath())?.["openai-compatible"];
+    return { baseUrl: a?.baseUrl, apiKey: a?.apiKey, models: isStr(a?.model) ? { main: a.model } : {} };
   },
   async reset() {
     const file = kiloPath();
@@ -332,6 +388,18 @@ const cline = {
     secrets.openAiApiKey = apiKey;
     writeJson(clineSecrets(), secrets);
     return [clineState(), clineSecrets()];
+  },
+  async show() {
+    const st = readJson(clineState()) || {};
+    const models = {};
+    if (isStr(st.openAiModelId)) models.act = st.openAiModelId;
+    if (isStr(st.planModeOpenAiModelId)) models.plan = st.planModeOpenAiModelId;
+    return {
+      baseUrl: st.openAiBaseUrl,
+      apiKey: readJson(clineSecrets())?.openAiApiKey,
+      models,
+      active: st.actModeApiProvider === "openai",
+    };
   },
   async reset() {
     const state = readJson(clineState());

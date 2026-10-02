@@ -139,6 +139,30 @@ npx 9router connect http://<server-host>:20128 --tools opencode --model ocg/glm-
 
 A model the server doesn't list is still written, with a `not listed by server` warning. To see the ids it serves: `curl http://<server-host>:20128/v1/models -H "Authorization: Bearer <your key>"`.
 
+### Checking the current config
+
+`9router show` prints what each CLI tool on this machine is currently set to — base URL, masked API key and models. It only reads local files and never contacts a server.
+
+```bash
+npx 9router show                 # every supported tool
+npx 9router show claude          # one tool
+npx 9router show claude codex    # several
+npx 9router show claude --json   # machine-readable (key still masked)
+```
+
+```
+✅ Claude Code
+   File:     ~/.claude/settings.json
+   Base URL: http://<server-host>:20128/v1
+   API key:  sk-a1b…9f3c
+   Models:
+     fable   cc/claude-fable-5-1
+     opus    cc/claude-opus-5-5
+     sonnet  cc/claude-sonnet-5-5
+```
+
+Tools not pointed at 9router are listed as `not configured`. For Codex, OpenCode and Cline it also warns when a 9router entry exists but another provider is the active one.
+
 ### Other options
 
 | Option | Purpose |
